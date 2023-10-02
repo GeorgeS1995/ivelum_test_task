@@ -1,60 +1,72 @@
 import asyncio
-import traceback
-import urllib.request
-from asyncio import StreamReader, StreamWriter
+import string
 
-# вынести в настройки
+import aiohttp
+from aiohttp import web
 
-PATH_TO_HN = 'news.ycombinator.com'
-# BUFFER_SIZE = 65536
-BUFFER_SIZE = 100
+PATH_TO_HN = "news.ycombinator.com"
+WORD_BORDERS = string.whitespace + r"""!"#$%'()*+,-.:;<=>?@[\]^`{|}~"""
 
 
-async def _request_to_target(reader: StreamReader, writer: StreamWriter):
-    while True:
-        readed_data = await reader.read(BUFFER_SIZE)
-        writer.write(readed_data)
-        if len(readed_data) < BUFFER_SIZE:
-            return
+def _modify_body(original_body: str) -> str:
+    new_body, len_counter = "", 0
+    i = 0
+    len_original_body = len(original_body)
+    while i < len_original_body:
+        symbol = original_body[i]
+        new_body += symbol
+        if symbol == ">":
+            looking_for_6_length_words = True
+            len_counter = 0
+        if symbol == "<":
+            looking_for_6_length_words = False
+        if (
+            looking_for_6_length_words
+            and symbol in string.ascii_letters
+            and (i == 0 or original_body[i - len_counter - 1] in WORD_BORDERS)
+        ):
+            len_counter += 1
+        else:
+            len_counter = 0
+        if len_counter == 6 and (
+            i + 1 == len_original_body or original_body[i + 1] in WORD_BORDERS
+        ):
+            new_body += "™"
+            len_counter = 0
+        i += 1
+    return new_body
 
-async def _request_to_client(reader: StreamReader, writer: StreamWriter):
-    total_data = b""
-    while True:
-        readed_data = await reader.read(BUFFER_SIZE)
-        writer.write(readed_data)
-        total_data += readed_data
-        if len(readed_data) < BUFFER_SIZE:
-            break
-    print(total_data)
+
+async def handler(request):
+    async with aiohttp.ClientSession() as session:
+        async with getattr(session, request.method.lower())(
+            f"https://{PATH_TO_HN}{request.path_qs}", headers=request.headers
+        ) as resp:
+            content = await resp.content.read()
+            if resp.content_type == "text/html":
+                kwargs = {"text": _modify_body(content.decode())}
+            else:
+                kwargs = {"body": content}
+            return web.Response(
+                status=resp.status, content_type=resp.content_type, **kwargs
+            )
 
 
+async def main():
+    server = web.Server(handler)
+    runner = web.ServerRunner(server)
+    await runner.setup()
+    site = web.TCPSite(runner, "localhost", 8080)
+    await site.start()
 
-async def proxy_handler(proxy_reader: StreamReader, proxy_writer: StreamWriter) -> None:
+    print("======= Serving on http://localhost:8080/ ======")
+
+    async with site._server:
+        await site._server.serve_forever()
+
+
+if __name__ == "__main__":
     try:
-        try:
-            hn_reader, hn_writer = await asyncio.open_connection(PATH_TO_HN, 443, ssl=True)
-        except Exception as err:
-            print(err)
-        await asyncio.gather(
-            _request_to_target(proxy_reader, hn_writer), _request_to_client(hn_reader, proxy_writer)
-        )
-        await asyncio.sleep(1)
-        hn_writer.close()
-        await hn_writer.wait_closed()
-        proxy_writer.close()
-        await proxy_writer.wait_closed()
-    except Exception as err:
-        print(err, "t2")
-        traceback.print_exc()
-
-
-async def start_server():
-    server = await asyncio.start_server(
-        proxy_handler, port=80)
-
-    async with server:
-        await server.serve_forever()
-
-
-if __name__ == '__main__':
-    asyncio.run(start_server())
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("======= Server has been stoped ======")
